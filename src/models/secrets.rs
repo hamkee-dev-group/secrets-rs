@@ -1,19 +1,13 @@
+use loco_rs::model::ModelError;
+use loco_rs::model::ModelResult;
 use sea_orm::entity::prelude::*;
 use sea_orm::Set;
-use serde::Serialize;
-pub use super::_entities::secrets::{ActiveModel, Model, Entity};
+use sea_orm::EntityTrait;
+use super::_entities::secrets::Column;
+pub use super::_entities::secrets::{self, ActiveModel, Model, Entity};
 pub type Secrets = Entity;
 use crate::cryptography::encryption::{AES256Cypher, CryptoError, Cypher};
 
-#[derive(Serialize, Default)]
-pub struct SecretApiModel {
-    pub uuid: Uuid,
-    pub created_at: DateTimeWithTimeZone,
-    maxviews: Option<u16>,
-    expiration_days: Option<u8>, 
-    length: usize,
-    secret: Option<String>,
-}
 
 #[async_trait::async_trait]
 impl ActiveModelBehavior for ActiveModel {
@@ -32,36 +26,67 @@ impl ActiveModelBehavior for ActiveModel {
 }
 
 impl Model {
-    pub fn to_api(&self) -> SecretApiModel {
-        SecretApiModel {
-            uuid: self.uuid,
-            created_at: self.created_at,
-            maxviews: self.maxviews,
-            expiration_days: self.exp,
-            length: self.ciphertext.len(), 
-            ..Default::default()
-        }
-    }
+
     pub fn decrypt(
         &self,
         passphrase: &[u8],
-    ) -> Result<SecretApiModel, CryptoError> {
+    ) -> Result<String, CryptoError> {
         let plaintext = Cypher::new(&AES256Cypher)
             .with_passphrase(passphrase.into())
             .decrypt(&self.ciphertext)?;
         let secret = String::from_utf8(plaintext).map_err(|_| CryptoError::InvalidData)?;
-        return Ok(SecretApiModel {
-            uuid: self.uuid,
-            created_at: self.created_at,
-            maxviews: self.maxviews,
-            expiration_days: self.exp,
-            length: self.ciphertext.len(),
-            secret: Some(secret),
-        })
+        Ok(secret)
+    }
+
+    pub async fn find_by_uuid(uuid: Uuid, db: &DatabaseConnection) -> ModelResult<Model>{
+        let secret = secrets::Entity::find()
+            .filter(Column::Uuid.eq(uuid))
+            .filter(Column::Maxviews.gt(0))
+            .one(db)
+            .await?;
+
+        if let Some(ref s) = secret {
+            if s.has_expired() {
+                return Err(ModelError::EntityNotFound);
+            }
+            if s.has_reached_maxviews() {
+                return Err(ModelError::EntityNotFound);
+            }
+        }
+
+        secret.ok_or_else(|| ModelError::EntityNotFound)
+    }
+
+    pub fn has_reached_maxviews(&self) -> bool {
+        if let Some(maxviews) = self.maxviews {
+            maxviews == 0
+        } else {
+            false
+        }
+    }
+
+    pub fn has_expired(&self) -> bool {
+        if let Some(exp_days) = self.exp {
+            let created_at = self.created_at;
+            let expiration_date = created_at + chrono::Duration::days(exp_days as i64);
+            let now = chrono::Utc::now();
+            now > expiration_date
+        } else {
+            false
+        }
+    }
+
+}
+
+
+impl From<CryptoError> for ModelError {
+    fn from(err: CryptoError) -> ModelError {
+        ModelError::Message(err.to_string())
     }
 }
 
 impl ActiveModel {
+
     pub fn new(ciphertext: Vec<u8>, maxviews: Option<u16>, expiration_days: Option<u8>) -> Self {
         let maxviews = maxviews.unwrap_or(1);
         let expiration_days = expiration_days.unwrap_or(1);
@@ -85,6 +110,21 @@ impl ActiveModel {
         let ciphertext = cipher.encrypt()?;
         return Ok(Self::new(ciphertext, maxviews, expiration_days));
     }
+
+    pub async fn decrement_maxviews_by_uuid(
+        uuid: Uuid,
+        db: &DatabaseConnection,
+    ) -> Result<(), ModelError> {
+        let secret = Model::find_by_uuid(uuid, db).await?;
+        let active_model = ActiveModel {
+            id: Set(secret.id),
+            maxviews: Set(secret.maxviews.map(|v| v - 1)),
+            ..Default::default()
+        };
+        active_model.update(db).await?;
+        Ok(())
+    }
+
 }
 
 impl Entity {}
