@@ -17,7 +17,7 @@ fn render_template(template_name: &str, context: &HashMap<&str, &str>) -> tera::
 }
 
 #[debug_handler]
-pub async fn home() -> Result<Response> {
+pub async fn encrypt() -> Result<Response> {
     let context = HashMap::new();
     let rendered = render_template("encrypt.html", &context)?;
     Ok(Response::new(rendered.into()))
@@ -33,6 +33,6 @@ pub async fn decrypt() -> Result<Response> {
 pub fn routes() -> Routes {
     Routes::new()
         .prefix("/")
-        .add("/", get(home))
+        .add("/", get(encrypt))
         .add("/decrypt", get(decrypt))
 }
